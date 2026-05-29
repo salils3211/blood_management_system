@@ -1,0 +1,188 @@
+import pandas as pd
+import datetime
+import streamlit as st
+import urllib.parse
+import webbrowser
+import time
+
+# 1. System Constants
+TOTAL_PATIENTS = 400
+DAYS_CYCLE = 15
+UNITS_PER_PATIENT = 2
+TARGET_POOL = 9600
+
+# 2. Optimized Data Generator Engine
+@st.cache_data
+def generate_system_data():
+    # Establish a reliable static start anchor for database tracking
+    base_date = datetime.date(2026, 1, 1)
+    
+    # 400 Patient Database - Assigned a deterministic baseline tracking slot
+    patient_data = {
+        "Patient ID": [f"PT-{i:03d}" for i in range(1, TOTAL_PATIENTS + 1)],
+        "Blood Group": ["O+", "A+", "B+", "AB+", "O-", "A-", "B-", "AB-"] * 50,
+        "Baseline Slot": [i % DAYS_CYCLE for i in range(TOTAL_PATIENTS)]
+    }
+    df_patients = pd.DataFrame(patient_data)
+    
+    # 9,600 Donor Database - Simulating historical last donation intervals
+    donor_data = {
+        "Donor ID": [f"DN-{i:04d}" for i in range(1, TARGET_POOL + 1)],
+        "Donor Name": [f"Donor Card #{i:04d}" for i in range(1, TARGET_POOL + 1)],
+        "Contact Number": [f"9198480{i:05d}" for i in range(1, TARGET_POOL + 1)],
+        "Blood Group": ["O+", "A+", "B+", "AB+", "O-", "A-", "B-", "AB-"] * 1200,
+        "Last Donation Date": [base_date - datetime.timedelta(days=(i % 60) + 40) for i in range(TARGET_POOL)]
+    }
+    df_donors = pd.DataFrame(donor_data)
+    return df_patients, df_donors
+
+df_patients, df_donors = generate_system_data()
+
+# 3. Streamlit Interface Initialization
+st.set_page_config(page_title="Dynamic Blood Supply Planner", layout="wide")
+#st.title("🩸 Thalassemia Supply Planner & WhatsApp Automation Center")
+st.title("🩸 Thalassemia Care Dashboard (Department of Transfusion Medicine, PGIMER, Chandigarh)")
+st.image("PGI_logo.jpg", width=100)
+
+# --- DATE CONTROL INTERACTION PANEL ---
+st.sidebar.header("🗓️ Operational Date Control")
+selected_date = st.sidebar.date_input(
+    label="Choose Target Planning Date",
+    value=datetime.date(2026, 1, 20), # Defaults to Jan 20 to prove fix immediately
+    min_value=datetime.date(2026, 1, 1),
+    max_value=datetime.date(2026, 12, 31)
+)
+
+# 4. Infinite Rolling Cycle & Sunday Safety Offload Filter Engine
+base_datetime = pd.to_datetime(datetime.date(2026, 1, 1))
+selected_datetime = pd.to_datetime(selected_date)
+current_day_name = selected_datetime.day_name()
+
+st.sidebar.markdown(f"**Selected Day Status:** `{current_day_name}`")
+
+# Calculate how many days have elapsed since system inception
+days_since_start = (selected_datetime - base_datetime).days
+
+# Map elapsed timeline to the active operational 15-day modulo window frame
+current_slot_today = days_since_start % DAYS_CYCLE
+
+if current_day_name == "Sunday":
+    # Sunday is closed; zero patients are drawn into today's timeline frame
+    patients_today = df_patients[df_patients['Patient ID'] == 'NONE'] 
+else:
+    # Pull standard scheduled patients for today's active cycle slot
+    patients_today = df_patients[df_patients['Baseline Slot'] == current_slot_today].copy()
+    
+    # Calculate the cycle slot offset numbers representing Sunday
+    days_until_sunday = (6 - selected_datetime.weekday()) % 7
+    sunday_datetime = selected_datetime + pd.Timedelta(days=days_until_sunday)
+    sunday_slot = (days_since_start + days_until_sunday) % DAYS_CYCLE
+    
+    # Check if selected date is a Friday or Saturday to safely append Sunday's load
+    if current_day_name == "Friday":
+        sunday_patients = df_patients[df_patients['Baseline Slot'] == sunday_slot]
+        offloaded_patients = sunday_patients.iloc[::2] # Extract even indices
+        patients_today = pd.concat([patients_today, offloaded_patients])
+    elif current_day_name == "Saturday":
+        sunday_patients = df_patients[df_patients['Baseline Slot'] == sunday_slot]
+        offloaded_patients = sunday_patients.iloc[1::2] # Extract odd indices
+        patients_today = pd.concat([patients_today, offloaded_patients])
+
+units_needed_today = len(patients_today) * UNITS_PER_PATIENT
+donors_needed_today = units_needed_today
+
+# Calculate active donor eligibility profiles relative to selected target planning date
+donor_last_dates = pd.to_datetime(df_donors['Last Donation Date'])
+df_donors['Days Since Donation'] = (selected_datetime - donor_last_dates).dt.days
+df_donors['Status'] = df_donors['Days Since Donation'].apply(lambda x: 'Eligible' if x >= 90 else 'Ineligible')
+eligible_donors_today = df_donors[df_donors['Status'] == 'Eligible']
+
+# 5. Live Operations KPI Status Array
+kpi1, kpi2, kpi3 = st.columns(3)
+kpi1.metric(label=f"Patients Scheduled Today", value=f"{len(patients_today)} Patients")
+kpi2.metric(label="Demand Window Targets", value=f"{units_needed_today} Units Required")
+kpi3.metric(label="Eligible Pool Available", value=f"{len(eligible_donors_today)} Donors", delta=f"{len(eligible_donors_today) - donors_needed_today} Surplus")
+
+st.markdown("---")
+
+# 6. Structured Output Presentation Modules
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader(f"📋 Appointment Docket ({current_day_name})")
+    if current_day_name == "Sunday":
+        st.success("🎉 Center Closed: Zero patients enrolled on Sundays. Load successfully offloaded to Friday/Saturday.")
+    elif not patients_today.empty:
+        if current_day_name in ["Friday", "Saturday"]:
+            st.warning(f"Note: Total includes balanced offload allocations from Sunday's cycle.")
+        st.dataframe(patients_today[['Patient ID', 'Blood Group']], use_container_width=True, hide_index=True)
+    else:
+        st.info("No patients scheduled.")
+
+with col2:
+    st.subheader("🎯 Priority Donor Outreach Matrix")
+    
+    if current_day_name == "Sunday":
+        st.info("No donor calls required today. Operations paused.")
+    else:
+        call_sheet = eligible_donors_today.sort_values(by='Days Since Donation', ascending=False)
+        
+        if not call_sheet.empty and not patients_today.empty:
+            required_groups = patients_today['Blood Group'].unique()
+            matched_call_sheet = call_sheet[call_sheet['Blood Group'].isin(required_groups)].copy()
+            
+            action_rows = []
+            for _, row in matched_call_sheet.iterrows():
+                msg = (
+                    f"Hello {row['Donor Name']}. Your matching blood group ({row['Blood Group']}) "
+                    f"is urgently required today at the Thalassemia Care Center. "
+                    f"Please reply to confirm your arrival window. Thank you!"
+                )
+                encoded_msg = urllib.parse.quote(msg)
+                whatsapp_url = f"wa.me{row['Contact Number']}?text={encoded_msg}"
+                
+                action_rows.append({
+                    "ID": row['Donor ID'],
+                    "Name": row['Donor Name'],
+                    "Blood Group": row['Blood Group'],
+                    "Phone": row['Contact Number'],
+                    "Days Rested": row['Days Since Donation'],
+                    "WhatsApp Link": whatsapp_url
+                })
+                
+            display_df = pd.DataFrame(action_rows)
+            
+            # --- WHATSAPP BATCH OUTREACH ENGINE ---
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("🚀 Bulk Notification Engine")
+            batch_size = st.sidebar.slider("Select Batch Size to Notify", 1, min(len(display_df), 15), 5)
+            
+            if st.sidebar.button(f"⚡ Launch Batch Trigger ({batch_size} Donors)"):
+                progress_bar = st.sidebar.progress(0)
+                status_text = st.sidebar.empty()
+                
+                batch_targets = display_df.head(batch_size)
+                for index, target in batch_targets.iterrows():
+                    status_text.text(f"Opening chat window for: {target['Name']}...")
+                    webbrowser.open(target['WhatsApp Link'])
+                    time.sleep(2.0)
+                    progress_bar.progress(int((index + 1) / batch_size * 100))
+                    
+                status_text.text("✅ Batch processing finished successfully!")
+                st.sidebar.success(f"Dispatched {batch_size} communication pipelines.")
+            
+            st.write("### Targeted Action Sheet")
+            st.data_editor(
+                display_df.head(40),
+                column_config={
+                    "WhatsApp Link": st.column_config.LinkColumn(
+                        "💬 Manual Dispatch",
+                        display_text="Open Chat"
+                    )
+                },
+                disabled=["ID", "Name", "Blood Group", "Phone", "Days Rested"],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.error("No active requirements or matching donors for today.")
